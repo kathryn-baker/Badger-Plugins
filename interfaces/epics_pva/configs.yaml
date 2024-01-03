@@ -1,0 +1,8 @@
+---
+name: epics_pva
+version: "0.1"
+dependencies:
+  - numpy
+  - badger-opt
+  - p4p
+  - joblib
