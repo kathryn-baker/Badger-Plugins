@@ -44,12 +44,14 @@ class Interface(interface.Interface):
         keepalive=60,
         poll_period=0.1,
         timeout=3,
+        parallel=False,
     ):
         self.host = host
         self.port = port
         self.keepalive = keepalive
         self.poll_period = poll_period
         self.timeout = timeout
+        self.parallel = parallel
         super().__init__()
 
     def get_default_params(self) -> dict:
@@ -129,9 +131,9 @@ class Interface(interface.Interface):
             logging.info(f"Set var for {channel} took {end_time - start_time:5.5f}s")
             return value
 
-    def set_values(self, channels, values, configs: Dict[str, dict], parallel=False):
+    def set_values(self, channels, values, configs: Dict[str, dict]):
         start = time.time()
-        if parallel:
+        if self.parallel:
             Parallel(n_jobs=mp.cpu_count())(
                 delayed(self.set_value)(channel, value, **configs[channel])
                 for channel, value in zip(channels, values)

@@ -14,9 +14,10 @@ class Interface(interface.Interface):
     name = "epics_pva"
     """Concrete interface for interacting with EPICS PVAccess PVs"""
 
-    def __init__(self, poll_period=0.1, timeout=3):
+    def __init__(self, poll_period=0.1, timeout=3, parallel=False):
         self.poll_period = poll_period
         self.timeout = timeout
+        self.parallel = parallel
         super().__init__()
 
     def get_default_params(self) -> dict:
@@ -37,7 +38,7 @@ class Interface(interface.Interface):
         context = Context("pva")
         values = context.get(channels)
         context.close()
-        return dict(zip(channels, values))
+        return dict(zip(channels, [value.raw.value for value in values]))
 
     def set_value(
         self,
@@ -83,9 +84,9 @@ class Interface(interface.Interface):
         context.close()
         return value
 
-    def set_values(self, channels, values, configs: Dict[str, dict], parallel=False):
+    def set_values(self, channels, values, configs: Dict[str, dict]):
         start = time.time()
-        if parallel:
+        if self.parallel:
             Parallel(n_jobs=mp.cpu_count())(
                 delayed(self.set_value)(channel, value, **configs[channel])
                 for channel, value in zip(channels, values)
