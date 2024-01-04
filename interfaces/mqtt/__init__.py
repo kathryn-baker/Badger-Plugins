@@ -66,15 +66,15 @@ class Interface(interface.Interface):
         self,
         channel: str,
         value,
-        validate_readback=False,
-        readback_pv=None,
-        tolerance=1e-3,
-        count_down=10,
-        offset=0,
+        set_config=None,
+        # validate_readback=False,
+        # readback_pv=None,
+        # tolerance=1e-3,
+        # count_down=10,
+        # offset=0,
     ):
         client = MQTTClient()
         start_time = time.time()
-        time_limit = deepcopy(count_down)
         # always put the value to the set PV
         set_topic = pv_name_to_mqtt_topic(channel, mode="set")
         if isinstance(value, np.ndarray):
@@ -90,8 +90,14 @@ class Interface(interface.Interface):
         client.publish(topic=set_topic, payload=json.dumps(payload))
         logging.debug(f"Published value {value} to {set_topic}")
         # then, if configured to look at a readback PV, do the check on the PV
-        if validate_readback:
+        if set_config is not None and set_config.get("validate_readback", False):
+            readback_pv = set_config.get("readback_pv")
+            tolerance = set_config.get("tolerance", 1e-3)
+            count_down = set_config.get("count_down", 10)
+            time_limit = deepcopy(count_down)
+            offset = set_config.get("offset", 0)
             readback_topic = pv_name_to_mqtt_topic(readback_pv, mode="get")
+            # set up the new client to store the incoming messages
             validation_client = ValidationClient(
                 monitor_topic=readback_topic,
             )
@@ -119,7 +125,7 @@ class Interface(interface.Interface):
             client.loop_stop()
             client.disconnect()
             if set_correct is False:
-                raise Exception(
+                logging.exception(
                     f"PV {channel} (current: {_value}) cannot reach expected value ({value}) in designated time {time_limit}!"
                 )
             else:
@@ -135,19 +141,19 @@ class Interface(interface.Interface):
         start = time.time()
         if self.parallel:
             Parallel(n_jobs=mp.cpu_count())(
-                delayed(self.set_value)(channel, value, **configs[channel])
+                delayed(self.set_value)(channel, value, configs.get(channel))
                 for channel, value in zip(channels, values)
             )
         else:
             for channel, value in zip(channels, values):
-                config = configs[channel]
-                self.set_value(channel, value, **config)
+                # config = configs[channel]
+                self.set_value(channel, value, configs.get(channel))
         end = time.time()
         logging.info(f"total set time: {end - start:.5f}s")
 
     def get_value(self, channel: str):
         # we don't use this here because it's a stream of data instead of a request
-        return self.get_values([channel])[channel]
+        return self.get_values([channel])[pv_name_to_mqtt_topic(channel, mode="get")]
 
     def get_values(self, channels: List[str]) -> Dict[str, float]:
         # in order to get values from MQTT, we need to start the loop and build

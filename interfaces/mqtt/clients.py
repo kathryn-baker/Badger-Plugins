@@ -11,6 +11,7 @@ class MQTTClient(Client):
         *args,
         **kwargs,
     ) -> None:
+        self.messages = {}
         super().__init__(*args, **kwargs)
 
     def on_connect(self, client, userdata, flags, rc):
