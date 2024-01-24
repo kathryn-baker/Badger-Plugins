@@ -53,11 +53,6 @@ class Interface(interface.Interface):
         channel: str,
         value,
         set_config=None,
-        # validate_readback=False,
-        # readback_pv=None,
-        # tolerance=1e-3,
-        # count_down=10,
-        # offset=0,
     ):
         # for parallel to work, context has to be made and closed within the function
         context = Context("pva")
