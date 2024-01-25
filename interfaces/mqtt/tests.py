@@ -5,6 +5,7 @@ current_file = Path(__file__)
 root_dir = current_file.parents[1]
 sys.path.insert(0, str(root_dir))
 import json
+import logging
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -314,3 +315,47 @@ class TestMQTTInterface:
         assert len(mock_client.connect.call_args_list) == len(channels)
         assert len(mock_client.loop_stop.call_args_list) == len(channels)
         assert len(mock_client.disconnect.call_args_list) == len(channels)
+
+    def test_mqtt_set_values_read_only(self, caplog, mock_client):
+        caplog.set_level(logging.INFO)
+        mock_client.connect = MagicMock()
+        interface = Interface(
+            host="testhost",
+            port=1883,
+            keepalive=60,
+            poll_period=0.1,
+            timeout=1,
+            parallel=False,
+            read_only=True,
+        )
+        interface.set_values(channels, values, configs={})
+
+        # check the log message is sent correctly and that context.put is not called
+        mock_client.connect.assert_not_called()
+        assert len(caplog.records) == 1
+        assert (
+            caplog.records[0].getMessage()
+            == f"Interface is set to read-only mode, cannot set values {values} to {channels}"
+        )
+
+    def test_mqtt_set_value_read_only(self, caplog, mock_client):
+        caplog.set_level(logging.INFO)
+        mock_client.connect = MagicMock()
+        interface = Interface(
+            host="testhost",
+            port=1883,
+            keepalive=60,
+            poll_period=0.1,
+            timeout=1,
+            parallel=False,
+            read_only=True,
+        )
+        interface.set_value(channels[0], values[0], set_config={})
+
+        # check the log message is sent correctly and that context.put is not called
+        mock_client.connect.assert_not_called()
+        assert len(caplog.records) == 1
+        assert (
+            caplog.records[0].getMessage()
+            == f"Interface is set to read-only mode, cannot set value {values[0]} to {channels[0]}"
+        )
