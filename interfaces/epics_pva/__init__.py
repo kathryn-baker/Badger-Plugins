@@ -53,11 +53,15 @@ class Interface(interface.Interface):
             values = [self.get_value(channel) for channel in channels]
         context.close()
         return dict(zip(channels, values))
-    def _put(self, context, value,channel):
+    def _put(self, context, channel, value):
         try:
             context.put(channel, value, timeout=self.timeout, get=True)
         except TypeError:
             context.put(channel, value.item(), timeout=self.timeout, get=True)
+        except TimeoutError as e:
+            raise
+        except Exception as e:
+            print(f'Failed to put value {value} to {channel} because of {e}')
 
     def set_value(
         self,
@@ -79,10 +83,10 @@ class Interface(interface.Interface):
                 logging.exception(f'Timeout Error on {channel}')
                 # we try again!
                 try:
+                    time.sleep(1)
                     self._put(context, channel, value)
                 except TimeoutError as e:
                     # give it some time and see if it fixes itself
-                    time.sleep(1)
                     logging.exception(f'Timeout on {channel}: {e} after 2 attempts and a 1 second delay')
                     # raise TimeoutError(f'Timeout on {channel}: {e} after 2 tries and ')
                 # raise e
@@ -113,6 +117,7 @@ class Interface(interface.Interface):
                         count_down -= 0.1
                     else:
                         logging.warning(f'readback PV {readback_pv} is in an I/O error state, validation will continue once it is out of this state')
+                        time.sleep(2)
                 logging.exception(
                     f"PV {channel} (current: {_value}) cannot reach expected value ({value}) in designated time {time_limit}!"
                 )
