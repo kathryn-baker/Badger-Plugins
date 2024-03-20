@@ -10,6 +10,36 @@ from joblib import Parallel, delayed
 from p4p.client.thread import Context
 
 
+def timeit(func):
+    def wrapper_timeit(*args, **kwargs):
+        start_time = time.time()
+        func(*args, **kwargs)
+        end_time = time.time()
+        logging.info(f"total set time: {end_time - start_time:.5f}s")
+
+    return wrapper_timeit
+
+
+def retry_on_timeout(func):
+    def wrapper_retry(*args, **kwargs):
+        channel = args[1]
+        try:
+            func(*args, **kwargs)
+        except TimeoutError:
+            # we try again!
+            # give it some time and see if it fixes itself
+            time.sleep(1)
+            try:
+                func(*args, **kwargs)
+            except TimeoutError as e:
+                # TODO - decide whether we should re-raise or not
+                raise TimeoutError(
+                    f"Timeout on {channel}: {e} after 2 attempts and a 1 second delay"
+                )
+
+    return wrapper_retry
+
+
 class Interface(interface.Interface):
     name = "epics_pva"
     """Concrete interface for interacting with EPICS PVAccess PVs"""
@@ -30,17 +60,15 @@ class Interface(interface.Interface):
     def get_value(self, channel: str):
         context = Context("pva")
         try:
-            return context.get(channel).raw.value
+            return context.get(channel).real
         except TimeoutError as e:
             # TODO - decide whether we should return a NaN value here
             logging.exception(f"{channel}: {e}")
             return np.nan
-            # raise e
         finally:
             context.close()
 
     def get_values(self, channels: List[str]) -> Dict[str, float]:
-        # time.sleep(self.poll_period)
         context = Context("pva")
         try:
             # using real allows us to quickly extract the number from both
@@ -51,106 +79,60 @@ class Interface(interface.Interface):
             # if we get a timeout error one even one of them, we retry to get
             # the individual values
             values = [self.get_value(channel) for channel in channels]
-        context.close()
+        finally:
+            context.close()
         return dict(zip(channels, values))
-    def _put(self, context, value,channel):
-        try:
-            context.put(channel, value, timeout=self.timeout, get=True)
-        except TypeError:
-            context.put(channel, value.item(), timeout=self.timeout, get=True)
 
-    def set_value(
-        self,
-        channel: str,
-        value,
-        set_config=None,
-    ):
+    @retry_on_timeout
+    def _put(self, context, channel, value):
+        try:
+            context.put(channel, value, timeout=self.timeout)
+        except TypeError:
+            context.put(channel, value.item(), timeout=self.timeout)
+        logging.debug(f"put value {value} to {channel}")
+
+    def set_value(self, channel: str, value, validation_function=None):
         if not self.read_only:
             # for parallel to work, context has to be made and closed within the function
             context = Context("pva")
-            start_time = time.time()
             # always put the value to the set PV
             try:
                 self._put(context, channel, value)
-            #     context.put(channel, value, timeout=self.timeout, get=True)
-            # except TypeError:
-            #     context.put(channel, value.item(), timeout=self.timeout, get=True)
-            except TimeoutError:
-                logging.exception(f'Timeout Error on {channel}')
-                # we try again!
-                try:
-                    self._put(context, channel, value)
-                except TimeoutError as e:
-                    # give it some time and see if it fixes itself
-                    time.sleep(1)
-                    logging.exception(f'Timeout on {channel}: {e} after 2 attempts and a 1 second delay')
-                    # raise TimeoutError(f'Timeout on {channel}: {e} after 2 tries and ')
-                # raise e
-            logging.debug(f"put value {value} to {channel}")
-            # then, if configured to look at a readback PV, do the check on the PV
-            if set_config is not None and set_config.get("validate_readback", False):
-                readback_pv = set_config.get("readback_pv")
-                tolerance = set_config.get("tolerance", 1e-3)
-                count_down = set_config.get("count_down", 10)
-                time_limit = deepcopy(count_down)
-                offset = set_config.get("offset", 0)
-                while count_down > 0:
-                    # replace with monitor and conditional variables
-                    _value = context.get(readback_pv, timeout=self.timeout)
-                    severity = _value.severity
-                    _value = _value.real
-                    if severity != 3:
-                        if np.isclose(_value, value + offset, atol=tolerance):
-                            # should we return the set value or the read value here?
-                            end_time = time.time()
-                            logging.debug(
-                                f"Set var for {channel} took {end_time - start_time:5.5f}s"
-                            )
-                            context.close()
-                            return _value
-
-                        time.sleep(0.1)
-                        count_down -= 0.1
-                    else:
-                        logging.warning(f'readback PV {readback_pv} is in an I/O error state, validation will continue once it is out of this state')
-                logging.exception(
-                    f"PV {channel} (current: {_value}) cannot reach expected value ({value}) in designated time {time_limit}!"
-                )
-            else:
-                end_time = time.time()
-                logging.debug(
-                    f"Set var for {channel} took {end_time - start_time:5.5f}s"
-                )
-            context.close()
-            return value
+                if validation_function is not None:
+                    try:
+                        validation_function(
+                            set_pv=channel,
+                            set_value=value,
+                            context=context,
+                            timeout=self.timeout,
+                        )
+                    except ValueError as e:
+                        logging.warning(e)
+                # context.close()
+                # return value
+            except TimeoutError as e:
+                logging.exception(e)
+            finally:
+                context.close()
         else:
             logging.info(
-                f"Interface is set to read-only mode, cannot set value {value} to {channel}"
+                "Interface is set to read-only mode, cannot set value %s to %s",
+                value,
+                channel,
             )
 
+    @timeit
     def set_values(self, channels, values, configs: Dict[str, dict]):
         if not self.read_only:
-            start = time.time()
             if self.parallel:
-                try:
-                    Parallel(n_jobs=mp.cpu_count())(
-                        delayed(self.set_value)(channel, value, configs.get(channel))
-                        for channel, value in zip(channels, values)
-                    )
-                except TimeoutError as e:
-                    # if we get a TimeoutError, for now we want to just continue with
-                    # the update and hope that getting the values after will calrify
-                    # what the value actually was
-                    # TODO this will have to be dealt with differently for a more 
-                    # generalisable solution across facilities as we want to make sure
-                    # that the values going into the Xopt model are correct
-                    logging.exception(e)
+                Parallel(n_jobs=mp.cpu_count())(
+                    delayed(self.set_value)(channel, value, configs.get(channel))
+                    for channel, value in zip(channels, values)
+                )
+
             else:
                 for channel, value in zip(channels, values):
-                    # TODO - what should we do if we can't get to the right value?
                     self.set_value(channel, value, configs.get(channel))
-            end = time.time()
-            logging.info(f"total set time: {end - start:.5f}s")
         else:
             logging.info(
                 f"Interface is set to read-only mode, cannot set values {values} to {channels}"
