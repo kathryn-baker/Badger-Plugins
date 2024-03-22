@@ -22,7 +22,7 @@ def timeit(func):
 
 def retry_on_timeout(func):
     def wrapper_retry(*args, **kwargs):
-        channel = args[1]
+        channel = args[2]
         try:
             func(*args, **kwargs)
         except TimeoutError:
@@ -111,7 +111,7 @@ class Interface(interface.Interface):
                 # context.close()
                 # return value
             except TimeoutError as e:
-                logging.exception(e)
+                logging.warning(e)
             finally:
                 context.close()
         else:
