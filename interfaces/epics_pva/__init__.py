@@ -2,12 +2,14 @@ import logging
 import multiprocessing as mp
 import time
 from copy import deepcopy
-from typing import Dict, List
+from functools import partial
+from typing import Any, Dict, List
 
 import numpy as np
 from badger import interface
 from joblib import Parallel, delayed
 from p4p.client.thread import Context
+from pydantic import Field
 
 
 def timeit(func):
@@ -41,24 +43,30 @@ def retry_on_timeout(func):
 
 
 class Interface(interface.Interface):
-    name = "epics_pva"
     """Concrete interface for interacting with EPICS PVAccess PVs"""
 
-    def __init__(self, poll_period=0.1, timeout=3, parallel=False, read_only=False):
-        self.poll_period = poll_period
-        self.timeout = timeout
-        self.parallel = parallel
-        self.read_only = read_only
-        super().__init__()
+    name: str = "epics_pva"
+    context_str: str = "pva"
+    timeout: float = Field(
+        default=3.0, description="Number of seconds to try connecting to a PV"
+    )
+    parallel: bool = Field(
+        default=False,
+        description="Flog indicating whether all variables should be set at once or in series.",
+    )
+    read_only: bool = Field(
+        default=False,
+        description="Flag to indicate whether the interface should allow values to be set or not.",
+    )
 
     def get_default_params(self) -> dict:
         return {
-            "context": "pva",
+            "context": self.context_str,
             "read-only": self.read_only,
         }
 
     def get_value(self, channel: str):
-        context = Context("pva")
+        context = Context(self.context_str)
         try:
             return context.get(channel).real
         except TimeoutError as e:
@@ -69,7 +77,9 @@ class Interface(interface.Interface):
             context.close()
 
     def get_values(self, channels: List[str]) -> Dict[str, float]:
-        context = Context("pva")
+        if isinstance(channels, str):
+            channels = [channels]
+        context = Context(self.context_str)
         try:
             # using real allows us to quickly extract the number from both
             # int/floats as well as enum types
@@ -94,7 +104,7 @@ class Interface(interface.Interface):
     def set_value(self, channel: str, value, validation_function=None):
         if not self.read_only:
             # for parallel to work, context has to be made and closed within the function
-            context = Context("pva")
+            context = Context(self.context_str)
             # always put the value to the set PV
             try:
                 self._put(context, channel, value)
@@ -122,18 +132,18 @@ class Interface(interface.Interface):
             )
 
     @timeit
-    def set_values(self, channels, values, configs: Dict[str, dict]):
+    def set_values(self, channel_inputs: Dict[str, Any], configs: Dict[str, partial]):
         if not self.read_only:
             if self.parallel:
                 Parallel(n_jobs=mp.cpu_count())(
                     delayed(self.set_value)(channel, value, configs.get(channel))
-                    for channel, value in zip(channels, values)
+                    for channel, value in channel_inputs.items()
                 )
 
             else:
-                for channel, value in zip(channels, values):
+                for channel, value in channel_inputs.items():
                     self.set_value(channel, value, configs.get(channel))
         else:
             logging.info(
-                f"Interface is set to read-only mode, cannot set values {values} to {channels}"
+                f"Interface is set to read-only mode, cannot set {channel_inputs}"
             )
