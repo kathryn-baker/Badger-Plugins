@@ -52,7 +52,7 @@ class Interface(interface.Interface):
     )
     parallel: bool = Field(
         default=False,
-        description="Flog indicating whether all variables should be set at once or in series.",
+        description="Flag indicating whether all variables should be set at once or in series.",
     )
     read_only: bool = Field(
         default=False,
