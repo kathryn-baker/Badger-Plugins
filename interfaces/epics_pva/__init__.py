@@ -17,7 +17,7 @@ def timeit(func):
         start_time = time.time()
         func(*args, **kwargs)
         end_time = time.time()
-        logging.info(f"total set time: {end_time - start_time:.5f}s")
+        logging.debug(f"total set time: {end_time - start_time:.5f}s")
 
     return wrapper_timeit
 
@@ -97,9 +97,9 @@ class Interface(interface.Interface):
     def _put(self, context, channel, value):
         try:
             context.put(channel, value, timeout=self.timeout)
+            logging.debug(f"put value {value} to {channel}")
         except TypeError:
             context.put(channel, value.item(), timeout=self.timeout)
-        logging.debug(f"put value {value} to {channel}")
 
     def set_value(self, channel: str, value, validation_function=None):
         if not self.read_only:
