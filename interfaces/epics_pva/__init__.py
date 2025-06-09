@@ -8,7 +8,7 @@ from typing import Any, Dict, List
 import numpy as np
 from badger import interface
 from joblib import Parallel, delayed
-from p4p.client.thread import Context
+from p4p.client.thread import Cancelled, Context, Disconnected, RemoteError, TimeoutError
 from pydantic import Field
 
 
@@ -22,34 +22,12 @@ def timeit(func):
     return wrapper_timeit
 
 
-def retry_on_timeout(func):
-    def wrapper_retry(*args, **kwargs):
-        channel = args[2]
-        try:
-            func(*args, **kwargs)
-        except TimeoutError:
-            # we try again!
-            # give it some time and see if it fixes itself
-            time.sleep(1)
-            try:
-                func(*args, **kwargs)
-            except TimeoutError as e:
-                # TODO - decide whether we should re-raise or not
-                raise TimeoutError(
-                    f"Timeout on {channel}: {e} after 2 attempts and a 1 second delay"
-                )
-
-    return wrapper_retry
-
-
 class Interface(interface.Interface):
     """Concrete interface for interacting with EPICS PVAccess PVs"""
 
     name: str = "epics_pva"
     context_str: str = "pva"
-    timeout: float = Field(
-        default=3.0, description="Number of seconds to try connecting to a PV"
-    )
+    timeout: float = Field(default=3.0, description="Number of seconds to try connecting to a PV")
     parallel: bool = Field(
         default=False,
         description="Flag indicating whether all variables should be set at once or in series.",
@@ -67,63 +45,104 @@ class Interface(interface.Interface):
 
     def get_value(self, channel: str):
         context = Context(self.context_str)
-        try:
-            return context.get(channel).real
-        except TimeoutError as e:
-            # TODO - decide whether we should return a NaN value here
-            logging.exception(f"{channel}: {e}")
-            return np.nan
-        finally:
-            context.close()
+
+        result = context.get(channel, throw=False)
+        if isinstance(result, (Disconnected, TimeoutError, RemoteError, Cancelled)):
+            logging.warning("Could not retrieve value of %s due to %s", channel, type(result).__name__)
+            result = np.nan
+        else:
+            result = result.real
+        context.close()
+        return result
 
     def get_values(self, channels: List[str]) -> Dict[str, float]:
         if isinstance(channels, str):
             channels = [channels]
         context = Context(self.context_str)
-        try:
-            # using real allows us to quickly extract the number from both
-            # int/floats as well as enum types
-            values = [value.real for value in context.get(channels)]
-        except TimeoutError:
-            logging.exception(f"Timeout error from {channels}, retrying individually")
-            # if we get a timeout error one even one of them, we retry to get
-            # the individual values
-            values = [self.get_value(channel) for channel in channels]
-        finally:
-            context.close()
-        return dict(zip(channels, values))
+        book = {}
 
-    @retry_on_timeout
+        results = context.get(channels, throw=False)
+        failures = []
+
+        for i, result in enumerate(results):
+            if isinstance(result, (Disconnected, TimeoutError, RemoteError, Cancelled)):
+                failures.append(channels[i])
+                logging.warning(
+                    "Could not retrieve value of %s due to %s. Retrying individually.",
+                    channels[i],
+                    type(result).__name__,
+                )
+            else:
+                book[channels[i]] = result.real
+
+        # then if there are any failures, retry the failed ones in the same way
+        if len(failures) >= 1:
+            results = context.get(failures, throw=False)
+
+            for i, result in enumerate(results):
+                if isinstance(result, (Disconnected, TimeoutError, RemoteError, Cancelled)):
+                    logging.warning("Could not retrieve value of %s due to %s.", failures[i], type(result).__name__)
+                    book[failures[i]] = np.nan
+                else:
+                    book[failures[i]] = result.real
+        context.close()
+        return book
+
     def _put(self, context, channel, value):
+        success = False
         try:
-            context.put(channel, value, timeout=self.timeout)
-            logging.debug(f"put value {value} to {channel}")
+            result = context.put(channel, value, timeout=self.timeout, throw=False)
         except TypeError:
-            context.put(channel, value.item(), timeout=self.timeout)
+            value = value.item()
+            result = context.put(channel, value, timeout=self.timeout, throw=False)
+        if result is None:
+            logging.debug(
+                "Put value %d to %s",
+                value,
+                channel,
+            )
+            success = True
+        else:
+            logging.info("Could not put value %d to %s due to %s. Retrying...", value, channel, type(result).__name__)
+            # retry after a short sleep
+            time.sleep(1)
+            result = context.put(channel, value, timeout=self.timeout, throw=False)
+            if result is None:
+                logging.debug(
+                    "Put value %d to %s",
+                    value,
+                    channel,
+                )
+                success = True
+            else:
+                logging.warning(
+                    "Could not put value %d to %s (second attempt) due to %s after a 1 second delay.",
+                    value,
+                    channel,
+                    type(result).__name__,
+                )
+        return success
 
     def set_value(self, channel: str, value, validation_function=None):
         if not self.read_only:
             # for parallel to work, context has to be made and closed within the function
             context = Context(self.context_str)
             # always put the value to the set PV
-            try:
-                self._put(context, channel, value)
-                if validation_function is not None:
-                    try:
-                        validation_function(
-                            set_pv=channel,
-                            set_value=value,
-                            context=context,
-                            timeout=self.timeout,
-                        )
-                    except ValueError as e:
-                        logging.warning(e)
-                # context.close()
-                # return value
-            except TimeoutError as e:
-                logging.warning(e)
-            finally:
-                context.close()
+
+            success = self._put(context, channel, value)
+            # if we weren't successful in setting the PV, there's no need to validate
+            # against the readback
+            if success and validation_function is not None:
+                try:
+                    validation_function(
+                        set_pv=channel,
+                        set_value=value,
+                        context=context,
+                        timeout=self.timeout,
+                    )
+                except (ValueError, TimeoutError) as e:
+                    logging.warning(e)
+            context.close()
         else:
             logging.info(
                 "Interface is set to read-only mode, cannot set value %s to %s",
@@ -144,6 +163,4 @@ class Interface(interface.Interface):
                 for channel, value in channel_inputs.items():
                     self.set_value(channel, value, configs.get(channel))
         else:
-            logging.info(
-                f"Interface is set to read-only mode, cannot set {channel_inputs}"
-            )
+            logging.info("Interface is set to read-only mode, cannot set %s", channel_inputs)
